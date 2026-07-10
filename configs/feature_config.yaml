@@ -1,0 +1,22 @@
+lags: [1, 7, 14, 21, 28, 35, 42, 56, 90]
+
+rolling:
+  windows: [7, 14, 28]
+  functions: [mean, std, max]
+  base_lags: [1, 7, 28, 35]  # compute rolling stats on top of these lags
+
+expanding:
+  functions: [mean, std]
+  min_periods: 28
+
+calendar:
+  features: [day_of_week, month, quarter, day_of_month, week_of_year]
+  binary: [is_weekend, is_month_start, is_month_end, is_payday]
+
+external:
+  oil_lags: [1, 7, 14]
+  include_promotion: true
+  include_transactions: true
+
+categorical:
+  features: [store_nbr, family, city, state, type, cluster]

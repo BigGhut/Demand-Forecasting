@@ -1,0 +1,47 @@
+[project]
+name = "demand-forecasting"
+version = "0.1.0"
+description = "Hybrid Prophet-CatBoost demand forecasting pipeline for retail sales prediction."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+
+dependencies = [
+    "catboost>=1.2",
+    "prophet>=1.1.5",
+    "darts>=0.30",
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "scikit-learn>=1.3",
+    "statsmodels>=0.14",
+    "shap>=0.43",
+    "plotly>=5.18",
+    "matplotlib>=3.8",
+    "seaborn>=0.13",
+    "streamlit>=1.30",
+    "pyyaml>=6.0",
+    "loguru>=0.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.1",
+]
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[tool.ruff]
+line-length = 99
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "ANN", "S", "B"]
+ignore = ["ANN101", "ANN102"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers -v"

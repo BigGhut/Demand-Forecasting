@@ -1,0 +1,23 @@
+prophet:
+  seasonality_mode: multiplicative
+  changepoint_prior_scale: 0.0198
+  yearly_seasonality: true
+  weekly_seasonality: true
+  daily_seasonality: false
+  holidays_country: EC  # Ecuador
+
+catboost:
+  iterations: 1000
+  learning_rate: 0.0576
+  depth: 6
+  loss_function: RMSEWithUncertainty
+  task_type: GPU
+  verbose: 100
+  early_stopping_rounds: 50
+
+pipeline:
+  forecast_horizon: 28
+  cv_windows: 5
+  cv_stride: 14
+  target_transform: box_cox  # difference | log | box_cox | none
+  aggregation_level: store_family  # store_family | store_item
