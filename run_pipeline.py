@@ -6,8 +6,9 @@ from src.data.loader import DataLoader
 from src.data.preprocessor import DataPreprocessor
 from src.features.pipeline import FeatureEngineeringPipeline
 from src.models.prophet_model import ProphetForecaster
-from src.models.catboost_model import CatBoostResidualModel
+from src.models.catboost_model import CatBoostResidualModel, horizon_safe_lags
 from src.models.hybrid_pipeline import HybridProphetCatBoost
+from src.utils.config import get_base_config
 
 from darts import TimeSeries
 
@@ -30,32 +31,31 @@ def main():
     df_clean = preprocessor.preprocess(datasets)
     
     # 3. Feature Engineering
-    feature_pipeline = FeatureEngineeringPipeline(forecast_horizon=28) # horizon 28 for testing
+    horizon = get_base_config().pipeline.forecast_horizon
+    feature_pipeline = FeatureEngineeringPipeline(forecast_horizon=horizon)
     df_features = feature_pipeline.fit_transform(
         df_clean, target_col='sales', date_col='date'
     )
-    
-    # Get grouped feature names
-    feat_dict = feature_pipeline.get_all_feature_names()
-    
-    # Prophet future covariates = calendar + external
-    prophet_covs = feat_dict['calendar'] + feat_dict['external']
-    
-    # Catboost past covariates = lags + rolling + expanding
-    catboost_covs = feat_dict['lags'] + feat_dict['rolling'] + feat_dict['expanding']
+
+    # Future covariates are known over the horizon. Target lags, rolling,
+    # expanding stats, and transactions stay in the past set.
+    prophet_covs = [c for c in feature_pipeline.future_covariate_names() if c in df_features.columns]
+    catboost_covs = [c for c in feature_pipeline.past_covariate_names() if c in df_features.columns]
     
     # Drop rows where past covariates (lags) are NaN to avoid issues
     df_features = df_features.dropna(subset=catboost_covs).reset_index(drop=True)
     
     # Convert Dtypes to avoid Dart issues
     df_features = df_features.select_dtypes(exclude=['category', 'object'])
-    
+    prophet_covs = [c for c in prophet_covs if c in df_features.columns]
+    catboost_covs = [c for c in catboost_covs if c in df_features.columns]
+
     # Fill any remaining NaNs in future covariates (like onpromotion)
     df_features[prophet_covs] = df_features[prophet_covs].fillna(0)
     
     # 4. Prepare for Darts (TimeSeries)
     # Since we dropped rows at the beginning, the series is contiguous from that new start date.
-    split_date = df_features['date'].max() - pd.Timedelta(days=28)
+    split_date = df_features['date'].max() - pd.Timedelta(days=horizon)
     train_df = df_features[df_features['date'] <= split_date]
     val_df = df_features[df_features['date'] > split_date]
     
@@ -77,14 +77,17 @@ def main():
         
     # 5. Model Training
     prophet = ProphetForecaster()
-    catboost = CatBoostResidualModel(lags=7, lags_past_covariates=7)
-    
+    # Lags at or beyond the horizon: a 28-step residual forecast must not
+    # recurse on its own predictions (lags=7 would).
+    safe_lags = horizon_safe_lags(horizon)
+    catboost = CatBoostResidualModel(lags=safe_lags, lags_past_covariates=safe_lags)
+
     hybrid = HybridProphetCatBoost(prophet_model=prophet, catboost_model=catboost)
-    
+
     hybrid.fit(ts_train, future_covariates=cov_future, past_covariates=cov_past)
-    
+
     # 6. Predict
-    preds = hybrid.predict(n=28, future_covariates=cov_future, past_covariates=cov_past, num_samples=100)
+    preds = hybrid.predict(n=horizon, future_covariates=cov_future, past_covariates=cov_past, num_samples=100)
                            
     logger.info(f"Predictions:\n{preds.quantile(0.5).to_dataframe().head()}")
     

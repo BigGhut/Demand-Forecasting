@@ -8,8 +8,26 @@ class ExternalFeatureGenerator:
     
     def __init__(self, oil_lags: list[int] | None = None,
                  include_promotion: bool = True,
-                 include_transactions: bool = True) -> None:
-        self.oil_lags = oil_lags or [1, 7, 14]
+                 include_transactions: bool = True,
+                 forecast_horizon: int = 28) -> None:
+        self.forecast_horizon = forecast_horizon
+        requested = list(oil_lags) if oil_lags is not None else [forecast_horizon]
+        valid = [lag for lag in requested if lag >= forecast_horizon]
+        if not valid:
+            logger.warning(
+                f"Oil lags {requested} are not known {forecast_horizon} days ahead. "
+                f"Using oil_lag_{forecast_horizon}."
+            )
+            valid = [forecast_horizon]
+        elif len(valid) < len(requested):
+            skipped = [lag for lag in requested if lag < forecast_horizon]
+            logger.warning(
+                f"Skipping oil lags {skipped}: oil is not known over a horizon of {forecast_horizon}."
+            )
+        self.oil_lags = valid
+        # Store traffic on the forecast dates does not exist yet. Lag by the
+        # full horizon so every forecast step still reads traffic from the origin.
+        self.transactions_lag = forecast_horizon
         self.include_promotion = include_promotion
         self.include_transactions = include_transactions
         self._feature_names: list[str] = []
@@ -70,16 +88,14 @@ class ExternalFeatureGenerator:
                     df_out[feat_name_max] = df_out['onpromotion'].rolling(window, min_periods=1).max()
                     df_out[feat_name_ema] = df_out['onpromotion'].ewm(span=window, min_periods=1).mean()
             
-        # Transactions lag
+        # Transactions are observed, not planned. Lag by the forecast horizon.
         if self.include_transactions and 'transactions' in df_out.columns:
-            # Must be lagged to prevent leakage! Transactions are not known ahead.
-            # Default lag = 1
-            feat_name = "transactions_lag_1"
+            feat_name = f"transactions_lag_{self.transactions_lag}"
             self._feature_names.append(feat_name)
             if group_cols:
-                df_out[feat_name] = df_out.groupby(group_cols)['transactions'].shift(1)
+                df_out[feat_name] = df_out.groupby(group_cols)['transactions'].shift(self.transactions_lag)
             else:
-                df_out[feat_name] = df_out['transactions'].shift(1)
+                df_out[feat_name] = df_out['transactions'].shift(self.transactions_lag)
                 
         logger.info(f"Generated {len(self._feature_names)} external features.")
         return df_out

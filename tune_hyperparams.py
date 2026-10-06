@@ -45,57 +45,67 @@ def tune_hybrid(trial, train_df, val_df):
     cat_lr = trial.suggest_float("learning_rate", 0.01, 0.3, log=True)
     cat_depth = trial.suggest_int("depth", 4, 10)
     
-    # Residual lags: either [28] or a list of specific lags to reduce auto-regression compounding
-    lag_type = trial.suggest_categorical("lag_type", ["contiguous_28", "sparse_weekly"])
-    if lag_type == "contiguous_28":
-        lags = 28
+    # Both options stay at or beyond the horizon, so the 28-step forecast
+    # does not recurse on predicted residuals.
+    lag_type = trial.suggest_categorical("lag_type", ["sparse_horizon", "wide_horizon"])
+    if lag_type == "sparse_horizon":
+        lags = [-28, -56]
     else:
-        lags = [-7, -14, -21, -28]
-        
+        lags = [-28, -35, -42, -56]
+
     horizon = 28
     pipeline = FeatureEngineeringPipeline(forecast_horizon=horizon)
     df_features = pipeline.fit_transform(pd.concat([train_df, val_df]))
     df_features = pipeline.drop_na_rows(df_features)
-    
+
     train_feat_df = df_features[df_features['date'] <= train_df['date'].max()]
     val_feat_df = df_features[df_features['date'] > train_df['date'].max()]
-    
+
     ts_train = TimeSeries.from_dataframe(train_feat_df, time_col='date', value_cols='sales', freq='D')
     ts_val = TimeSeries.from_dataframe(val_feat_df, time_col='date', value_cols='sales', freq='D')
-    
-    prophet_covs = [f for feats in pipeline.get_all_feature_names().values() for f in feats]
-    cov_future = TimeSeries.from_dataframe(df_features, time_col='date', value_cols=prophet_covs, freq='D')
-    
+
+    future_cols = [c for c in pipeline.future_covariate_names() if c in df_features.columns]
+    past_cols = [c for c in pipeline.past_covariate_names() if c in df_features.columns]
+    cov_future = (
+        TimeSeries.from_dataframe(df_features, time_col='date', value_cols=future_cols, freq='D')
+        if future_cols else None
+    )
+    cov_past = (
+        TimeSeries.from_dataframe(df_features, time_col='date', value_cols=past_cols, freq='D')
+        if past_cols else None
+    )
+
     p_config = ProphetConfig(changepoint_prior_scale=prophet_cps, seasonality_mode='multiplicative', yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
     c_config = CatBoostConfig(learning_rate=cat_lr, depth=cat_depth, iterations=100, task_type='CPU', early_stopping_rounds=10)
-    
+
     prophet = ProphetForecaster(config=p_config)
     catboost = CatBoostResidualModel(config=c_config, lags=lags, lags_past_covariates=lags)
     hybrid = HybridProphetCatBoost(prophet_model=prophet, catboost_model=catboost)
-    
-    hybrid.fit(ts_train, future_covariates=cov_future, past_covariates=cov_future)
-    preds = hybrid.predict(n=horizon, future_covariates=cov_future, past_covariates=cov_future, num_samples=1)
-    
+
+    hybrid.fit(ts_train, future_covariates=cov_future, past_covariates=cov_past)
+    preds = hybrid.predict(n=horizon, future_covariates=cov_future, past_covariates=cov_past, num_samples=1)
+
     metrics = BusinessMetrics.standard_metrics(ts_val, preds)
-    
-    # If Tracking Signal is breached, heavily penalize
-    ts_val = metrics.get('Tracking Signal', 0)
+
+    # If Tracking Signal is breached, heavily penalize.
+    # WAPE, not MAPE: zero-filled days make MAPE undefined or explosive.
+    tracking = metrics.get('Tracking Signal', 0)
     penalty = 0
-    if ts_val < -4 or ts_val > 4:
+    if tracking < -4 or tracking > 4:
         penalty = 1000
-        
-    return metrics['MAPE'] + penalty, metrics['RMSE'], metrics['WAPE'], metrics['R2']
+
+    return metrics['WAPE'] + penalty, metrics['RMSE'], metrics['WAPE'], metrics['R2']
 
 if __name__ == "__main__":
     train_df, val_df, cv = get_data_and_cv(1, 'PRODUCE')
     logger.info(f"CV for Store 1 PRODUCE: {cv:.4f}")
     
     def objective(trial):
-        mape, rmse, wape, r2 = tune_hybrid(trial, train_df, val_df)
-        return mape
+        wape, rmse, _, r2 = tune_hybrid(trial, train_df, val_df)
+        return wape
         
     study = optuna.create_study(direction="minimize")
     study.optimize(objective, n_trials=5)
     
-    logger.info(f"Best trial: {study.best_trial.value}")
+    logger.info(f"Best trial WAPE: {study.best_trial.value}")
     logger.info(f"Best params: {study.best_trial.params}")

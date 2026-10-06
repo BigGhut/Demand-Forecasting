@@ -1,9 +1,9 @@
-lags: [1, 7, 14, 21, 28, 35, 42, 56, 90]
+lags: [28, 35, 42, 56, 90]
 
 rolling:
   windows: [7, 14, 28]
   functions: [mean, std, max]
-  base_lags: [1, 7, 28, 35]  # compute rolling stats on top of these lags
+  base_lags: [28, 35]  # rolling stats on lags that are known over the 28-day horizon
 
 expanding:
   functions: [mean, std]
@@ -14,7 +14,7 @@ calendar:
   binary: [is_weekend, is_month_start, is_month_end, is_payday]
 
 external:
-  oil_lags: [1, 7, 14]
+  oil_lags: [28, 35, 42]
   include_promotion: true
   include_transactions: true
 

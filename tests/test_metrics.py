@@ -14,7 +14,14 @@ def test_peak_capture_rate():
     assert BusinessMetrics.peak_capture_rate(y_true, y_pred1, threshold_percentile=90) == 1.0
     
     y_pred2 = create_ts([15, 15, 50, 15])
-    assert BusinessMetrics.peak_capture_rate(y_true, y_pred2, threshold_percentile=90) == 1.0
+    # 50 is below the 90th percentile of the actuals, so the peak is missed.
+    assert BusinessMetrics.peak_capture_rate(y_true, y_pred2, threshold_percentile=90) == 0.0
+
+def test_mape_skips_zero_actuals():
+    y_true = create_ts([0, 100, 0])
+    y_pred = create_ts([5, 110, 0])
+    metrics = BusinessMetrics.standard_metrics(y_true, y_pred)
+    assert metrics["MAPE"] == pytest.approx(10.0)
 
 def test_direction_accuracy():
     y_true = create_ts([10, 20, 100, 10])

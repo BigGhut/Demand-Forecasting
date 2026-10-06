@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from darts import TimeSeries
-from darts.metrics import mae, rmse, mape, smape, r2_score
+from darts.metrics import mae, rmse, smape, r2_score
 
 class BusinessMetrics:
     """Custom business-oriented metrics for demand forecasting."""
@@ -14,7 +14,7 @@ class BusinessMetrics:
         return {
             "MAE": mae(actual, pred),
             "RMSE": rmse(actual, pred),
-            "MAPE": mape(actual, pred),
+            "MAPE": BusinessMetrics.mape(actual, pred),
             "sMAPE": smape(actual, pred),
             "R2": r2_score(actual, pred),
             "WAPE": BusinessMetrics.wape(actual, pred),
@@ -23,6 +23,21 @@ class BusinessMetrics:
             "CV": BusinessMetrics.coefficient_of_variation(actual)
         }
         
+    @staticmethod
+    def mape(actual: TimeSeries, pred: TimeSeries) -> float:
+        """Mean absolute percentage error, skipping days where the actual is zero.
+
+        Darts ``mape`` raises ``ValueError`` when any actual is zero. The
+        preprocessor zero-fills missing days, so that implementation cannot
+        be the pipeline metric.
+        """
+        y_true = actual.values().flatten()
+        y_pred = pred.values().flatten()
+        mask = y_true != 0
+        if not np.any(mask):
+            return np.nan
+        return float(np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100.0)
+
     @staticmethod
     def wape(actual: TimeSeries, pred: TimeSeries) -> float:
         y_true = actual.values().flatten()
@@ -80,23 +95,22 @@ class BusinessMetrics:
     def peak_capture_rate(actual: TimeSeries, pred: TimeSeries, threshold_percentile: float = 90.0) -> float:
         """Percentage of actual peaks that were correctly forecasted as peaks.
         
-        A peak is defined as a value above the `threshold_percentile` of the actual series.
+        A peak is a value above the ``threshold_percentile`` of the actual series.
+        The forecast captures that peak when its value on the same day clears
+        the same actual threshold.
         """
         y_true = actual.values().flatten()
         y_pred = pred.values().flatten()
-        
+
         if len(y_true) == 0:
             return np.nan
-            
+
         threshold = np.percentile(y_true, threshold_percentile)
-        
+
         actual_peaks_idx = np.where(y_true > threshold)[0]
         if len(actual_peaks_idx) == 0:
             return 1.0  # No peaks to miss
-            
-        # We consider a peak "captured" if the prediction at that index is also above the threshold,
-        # or at least in the top (100 - threshold_percentile)% of predictions.
-        pred_threshold = np.percentile(y_pred, threshold_percentile)
-        captured = np.sum(y_pred[actual_peaks_idx] > pred_threshold)
-        
+
+        captured = np.sum(y_pred[actual_peaks_idx] > threshold)
+
         return float(captured / len(actual_peaks_idx))

@@ -40,7 +40,7 @@ class CatBoostConfig(BaseModel):
     learning_rate: float = Field(0.05, gt=0)
     depth: int = Field(6, ge=1, le=16)
     loss_function: str = "RMSEWithUncertainty"
-    task_type: Literal["CPU", "GPU"] = "GPU"
+    task_type: Literal["CPU", "GPU"] = "CPU"
     verbose: int = 100
     early_stopping_rounds: int = Field(50, gt=0)
 
@@ -73,7 +73,7 @@ class RollingConfig(BaseModel):
 
     windows: list[int] = Field(default_factory=lambda: [7, 14, 28])
     functions: list[str] = Field(default_factory=lambda: ["mean", "std"])
-    base_lags: list[int] = Field(default_factory=lambda: [1, 7])
+    base_lags: list[int] = Field(default_factory=lambda: [28, 35])
 
 
 class ExpandingConfig(BaseModel):
@@ -108,7 +108,7 @@ class CalendarConfig(BaseModel):
 class ExternalConfig(BaseModel):
     """External signal features (oil prices, promotions, transactions)."""
 
-    oil_lags: list[int] = Field(default_factory=lambda: [1, 7, 14])
+    oil_lags: list[int] = Field(default_factory=lambda: [28, 35, 42])
     include_promotion: bool = True
     include_transactions: bool = True
 
@@ -131,7 +131,7 @@ class CategoricalConfig(BaseModel):
 class FeatureConfig(BaseModel):
     """Complete feature engineering configuration."""
 
-    lags: list[int] = Field(default_factory=lambda: [1, 7, 14, 28])
+    lags: list[int] = Field(default_factory=lambda: [28, 35, 42, 56])
     rolling: RollingConfig = Field(default_factory=RollingConfig)
     expanding: ExpandingConfig = Field(default_factory=ExpandingConfig)
     calendar: CalendarConfig = Field(default_factory=CalendarConfig)

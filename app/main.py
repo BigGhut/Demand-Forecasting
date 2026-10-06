@@ -6,8 +6,6 @@ import numpy as np
 from src.data.loader import DataLoader
 from src.data.preprocessor import DataPreprocessor
 from src.features.pipeline import FeatureEngineeringPipeline
-from src.models.prophet_model import ProphetForecaster
-from src.models.catboost_model import CatBoostResidualModel
 from src.models.hybrid_pipeline import HybridProphetCatBoost
 from src.visualization.decomposition_plots import plot_hybrid_decomposition
 from src.visualization.evaluation_plots import plot_forecast_vs_actuals
@@ -61,12 +59,13 @@ if st.sidebar.button("Run Forecast Pipeline"):
             df_clean, target_col='sales', date_col='date'
         )
         
-        feat_dict = feature_pipeline.get_all_feature_names()
-        prophet_covs = feat_dict['calendar'] + feat_dict['external']
-        catboost_covs = feat_dict['lags'] + feat_dict['rolling'] + feat_dict['expanding']
-        
+        prophet_covs = [c for c in feature_pipeline.future_covariate_names() if c in df_features.columns]
+        catboost_covs = [c for c in feature_pipeline.past_covariate_names() if c in df_features.columns]
+
         df_features = df_features.dropna(subset=catboost_covs).reset_index(drop=True)
         df_features = df_features.select_dtypes(exclude=['category', 'object'])
+        prophet_covs = [c for c in prophet_covs if c in df_features.columns]
+        catboost_covs = [c for c in catboost_covs if c in df_features.columns]
         df_features[prophet_covs] = df_features[prophet_covs].fillna(0)
         
         split_date = df_features['date'].max() - pd.Timedelta(days=horizon)
@@ -81,35 +80,17 @@ if st.sidebar.button("Run Forecast Pipeline"):
         
     with st.spinner(f"Training Model for Class {abc_class}..."):
         router = ForecastRouter(store_nbr, family, st.session_state.segmenter)
-        model = router.get_model()
-        
-        # Apply log1p transformation to stabilize variance (BoxCox failed due to zeros)
-        ts_train_transformed = ts_train.map(lambda x: np.log1p(x))
-        
-        # Determine covariates
-        if isinstance(model, HybridProphetCatBoost):
-            model.fit(ts_train_transformed, future_covariates=cov_future, past_covariates=cov_past)
-        else:
-            # Pure CatBoost. Combine all covariates into past_covariates for simplicity.
-            # Darts supports lags_future_covariates, but it's simpler to pass all as past
-            if cov_future and cov_past:
-                all_covs = cov_past.stack(cov_future)
-            else:
-                all_covs = cov_past or cov_future
-            # We need to explicitly initialize CatBoost with lags for the combined covariates
-            model = CatBoostResidualModel(lags_past_covariates=28)
-            model.fit(ts_train_transformed, past_covariates=all_covs)
-        
+        model = router.get_model(forecast_horizon=horizon)
+        # The model applies base_config target_transform and inverts it in predict.
+        model.fit(ts_train, future_covariates=cov_future, past_covariates=cov_past)
+
     with st.spinner("Generating Forecast..."):
-        if isinstance(model, HybridProphetCatBoost):
-            preds_transformed = model.predict(n=horizon, future_covariates=cov_future, past_covariates=cov_past, num_samples=100)
-        else:
-            preds_transformed = model.predict(n=horizon, past_covariates=all_covs, num_samples=100)
-            
-        # Inverse transform
-        preds = preds_transformed.map(lambda x: np.expm1(x))
-        
-        # Post-processing: Clip negative predictions to 0
+        preds = model.predict(
+            n=horizon,
+            future_covariates=cov_future,
+            past_covariates=cov_past,
+            num_samples=100,
+        )
         preds = preds.map(lambda x: np.clip(x, 0, None))
             
         st.success(f"Forecast completed for Store {store_nbr}, {family}!")
@@ -164,13 +145,12 @@ if st.sidebar.button("Run Forecast Pipeline"):
                     cov_df.columns = ['ds' if c[0] == 'ds' else c[0] for c in cov_df.columns]
                 future_dates = future_dates.merge(cov_df, on='ds', how='left')
                 
-            # Get detailed Prophet components (in log scale)
+            # Get detailed Prophet components (still in transformed space)
             components = model.prophet.model.model.predict(future_dates)
             trend_log = TimeSeries.from_dataframe(components, time_col='ds', value_cols='trend')
-            
-            # Apply Inverse Transform (np.expm1) to bring back to original scale (Sales)
-            val_prophet_preds = val_prophet_preds_log.map(lambda x: np.expm1(x))
-            val_prophet_trend = trend_log.map(lambda x: np.expm1(x))
+
+            val_prophet_preds = model.inverse_transform(val_prophet_preds_log)
+            val_prophet_trend = model.inverse_transform(trend_log)
             
             # Calculate Seasonality in original scale as a multiplier (centered around 1.0)
             val_prophet_seasonality = val_prophet_preds / val_prophet_trend

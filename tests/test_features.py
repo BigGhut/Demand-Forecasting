@@ -17,33 +17,71 @@ def test_pipeline_valid_lags(monkeypatch):
     from src.utils.config import FeatureConfig
     # Mock config to have valid lags
     mock_config = FeatureConfig(lags=[28, 35])
-    
+
     # We patch the default get_feature_config to return our mock
     monkeypatch.setattr('src.features.pipeline.get_feature_config', lambda: mock_config)
-    
+
     pipeline = FeatureEngineeringPipeline(forecast_horizon=28)
     df = pd.DataFrame({"date": [1], "sales": [1]})
-    pipeline.validate_no_leakage(df, "sales", "date")
+    assert pipeline.validate_no_leakage(df, "sales", "date") is True
 
 def test_feature_generation():
-    """Test end-to-end feature generation on dummy data."""
-    dates = pd.date_range("2023-01-01", periods=100)
+    """Horizon 28 must keep only lags that are known at the forecast origin."""
+    dates = pd.date_range("2023-01-01", periods=120)
+    rng = np.random.default_rng(0)
     df = pd.DataFrame({
         "date": dates,
-        "store_nbr": [1]*100,
-        "family": ["PRODUCE"]*100,
-        "sales": np.random.randn(100) * 10 + 100,
-        "onpromotion": np.random.randint(0, 10, 100),
-        "dcoilwtico": np.linspace(40, 50, 100)
+        "store_nbr": [1] * 120,
+        "family": ["PRODUCE"] * 120,
+        "sales": rng.uniform(1, 100, size=120),
+        "onpromotion": rng.integers(0, 10, size=120),
+        "dcoilwtico": np.linspace(40, 50, 120),
+        "transactions": rng.uniform(100, 200, size=120),
     })
-    
-    pipeline = FeatureEngineeringPipeline(forecast_horizon=1) # safe horizon
+
+    pipeline = FeatureEngineeringPipeline(forecast_horizon=28)
     df_out = pipeline.fit_transform(df, target_col="sales", date_col="date")
-    
-    # Check that lags were generated
-    assert "lag_1" in df_out.columns
-    assert "lag_7" in df_out.columns
-    
-    # Check calendar features
+
+    assert "lag_1" not in df_out.columns
+    assert "lag_7" not in df_out.columns
+    assert "lag_28" in df_out.columns
+    assert "oil_lag_1" not in df_out.columns
+    assert "oil_lag_28" in df_out.columns
+    assert "transactions_lag_1" not in df_out.columns
+    assert "transactions_lag_28" in df_out.columns
+    assert "rolling_mean_lag28_w7" in df_out.columns
+    assert "expanding_mean" in df_out.columns
     assert "day_of_week" in df_out.columns
     assert "is_weekend" in df_out.columns
+
+    safe = df_out["sales"].shift(28).expanding(min_periods=28).mean()
+    raw = df_out["sales"].expanding(min_periods=28).mean()
+    mask = df_out["expanding_mean"].notna()
+    np.testing.assert_allclose(df_out.loc[mask, "expanding_mean"], safe[mask])
+    assert not np.allclose(df_out.loc[mask, "expanding_mean"], raw[mask])
+
+    future = pipeline.future_covariate_names()
+    past = pipeline.past_covariate_names()
+    assert "day_of_week" in future
+    assert "oil_lag_28" in future
+    assert not any(name.startswith(("lag_", "rolling_", "expanding_", "transactions_")) for name in future)
+    assert "lag_28" in past
+    assert "expanding_mean" in past
+    assert "transactions_lag_28" in past
+
+def test_short_base_lags_are_replaced_not_dropped():
+    from src.features.rolling_features import RollingFeatureGenerator
+
+    gen = RollingFeatureGenerator(base_lags=[1, 7], windows=[7], functions=["mean"], forecast_horizon=28)
+    assert gen.base_lags == [28]
+    df = pd.DataFrame({"sales": np.arange(40, dtype=float)})
+    out = gen.transform(df, target_col="sales")
+    assert "rolling_mean_lag28_w7" in out.columns
+
+def test_fit_transform_rejects_failed_validation(monkeypatch):
+    pipeline = FeatureEngineeringPipeline(forecast_horizon=28)
+    monkeypatch.setattr(pipeline, "validate_no_leakage", lambda *args, **kwargs: False)
+    dates = pd.date_range("2023-01-01", periods=40)
+    df = pd.DataFrame({"date": dates, "sales": np.arange(40, dtype=float) + 1.0})
+    with pytest.raises(ValueError, match="Leakage validation failed"):
+        pipeline.fit_transform(df, target_col="sales", date_col="date")

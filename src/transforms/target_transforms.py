@@ -26,7 +26,9 @@ class TargetTransformer:
     -----------------
     * ``"difference"`` — first-order differencing (``diff(1)`` / ``cumsum``).
     * ``"log"`` — ``log1p`` / ``expm1`` (safe for zeros).
-    * ``"box_cox"`` — Box-Cox with fitted λ (requires strictly positive data).
+    * ``"box_cox"`` — Box-Cox with λ fit on the series passed to :meth:`fit`.
+      If that series has a non-positive value, add 1 to every observation
+      (not only to the zeros). Each training window needs its own :meth:`fit`.
     * ``"none"`` — identity pass-through.
 
     **Critical invariant**: ``inverse_transform(transform(x)) ≈ x``.
@@ -49,6 +51,8 @@ class TargetTransformer:
         # State stored during fit (depending on method)
         self._first_value: float | None = None
         self._boxcox_lambda: float | None = None
+        self._boxcox_shift: float = 0.0
+        self._boxcox_fit_size: int | None = None
 
     # ------------------------------------------------------------------
     # Fit
@@ -60,7 +64,8 @@ class TargetTransformer:
         Parameters
         ----------
         series : pd.Series
-            The *original* (untransformed) target series.
+            Training target for the current window. Box-Cox λ is estimated
+            from this sample only and is replaced on the next ``fit`` call.
 
         Returns
         -------
@@ -82,15 +87,31 @@ class TargetTransformer:
             logger.debug("Log transform fitted (stateless aside from validation).")
 
         elif self.method == "box_cox":
-            clean = series.dropna()
+            # λ is the Gaussian MLE on this series alone. Call fit again for
+            # the next CV window; do not reuse a λ estimated on a longer sample.
+            clean = series.dropna().astype(float)
             if (clean <= 0).any():
-                raise ValueError(
-                    "Box-Cox requires strictly positive values. "
-                    "Consider adding a constant or using 'log'."
+                # One constant for every timestamp. Adding 1 only on zero days
+                # would turn both an original 0 and an original 1 into 1.
+                self._boxcox_shift = 1.0
+                logger.warning(
+                    "Box-Cox input has non-positive values. Adding 1 to every observation."
                 )
-            _, lam = boxcox(clean.values)
+            else:
+                self._boxcox_shift = 0.0
+            shifted = clean.to_numpy(dtype=float) + self._boxcox_shift
+            if np.any(shifted <= 0):
+                raise ValueError(
+                    "Box-Cox needs strictly positive values after adding 1. "
+                    "Clip the target at 0 before fitting."
+                )
+            _, lam = boxcox(shifted)
             self._boxcox_lambda = float(lam)
-            logger.debug(f"Box-Cox fit: lambda={self._boxcox_lambda:.6f}")
+            self._boxcox_fit_size = int(clean.shape[0])
+            logger.debug(
+                f"Box-Cox fit on {self._boxcox_fit_size} points: "
+                f"lambda={self._boxcox_lambda:.6f}, shift={self._boxcox_shift}"
+            )
 
         else:
             logger.debug("Identity transform (none) — no fitting needed.")
@@ -127,7 +148,8 @@ class TargetTransformer:
 
         if self.method == "box_cox":
             assert self._boxcox_lambda is not None
-            transformed = boxcox(series.values, lmbda=self._boxcox_lambda)
+            shifted = series.astype(float) + self._boxcox_shift
+            transformed = boxcox(shifted.values, lmbda=self._boxcox_lambda)
             return pd.Series(transformed, index=series.index, name=series.name)
 
         # method == "none"
@@ -179,7 +201,7 @@ class TargetTransformer:
 
         if self.method == "box_cox":
             assert self._boxcox_lambda is not None
-            inv = inv_boxcox(series.values, self._boxcox_lambda)
+            inv = inv_boxcox(series.values, self._boxcox_lambda) - self._boxcox_shift
             return pd.Series(inv, index=series.index, name=series.name)
 
         # method == "none"
@@ -301,5 +323,5 @@ class TargetTransformer:
             if self.method == "difference":
                 extras = f", first_value={self._first_value}"
             elif self.method == "box_cox":
-                extras = f", lambda={self._boxcox_lambda:.6f}"
+                extras = f", lambda={self._boxcox_lambda:.6f}, shift={self._boxcox_shift}"
         return f"TargetTransformer(method='{self.method}', {status}{extras})"

@@ -312,6 +312,21 @@ class DataPreprocessor:
                 df = df.sort_values("date")
                 df["dcoilwtico"] = df["dcoilwtico"].ffill().bfill()
 
+            # Store attributes are constant, but the new date rows come from
+            # the calendar cross-join and do not carry them.
+            static_cols = [c for c in ("city", "state", "type", "cluster") if c in df.columns]
+            meta_keys = ["store_nbr"] if "store_nbr" in df.columns else list(group_keys)
+            if static_cols and meta_keys:
+                df = df.sort_values(meta_keys + ["date"])
+                df[static_cols] = df.groupby(meta_keys, sort=False)[static_cols].ffill()
+                df[static_cols] = df.groupby(meta_keys, sort=False)[static_cols].bfill()
+
+            # A date inserted to close a gap was not on the holiday table.
+            if "is_localized_holiday" in df.columns:
+                df["is_localized_holiday"] = (
+                    df["is_localized_holiday"].fillna(0).astype(np.int8)
+                )
+
             logger.info(
                 "Date range completed — {rows:,} rows after fill",
                 rows=len(df),

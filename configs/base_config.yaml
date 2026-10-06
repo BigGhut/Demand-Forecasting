@@ -11,7 +11,7 @@ catboost:
   learning_rate: 0.0576
   depth: 6
   loss_function: RMSEWithUncertainty
-  task_type: GPU
+  task_type: CPU
   verbose: 100
   early_stopping_rounds: 50
 
