@@ -61,13 +61,13 @@ def test_feature_generation():
     assert not np.allclose(df_out.loc[mask, "expanding_mean"], raw[mask])
 
     future = pipeline.future_covariate_names()
-    past = pipeline.past_covariate_names()
+    shifted = pipeline.shifted_covariate_names()
     assert "day_of_week" in future
     assert "oil_lag_28" in future
     assert not any(name.startswith(("lag_", "rolling_", "expanding_", "transactions_")) for name in future)
-    assert "lag_28" in past
-    assert "expanding_mean" in past
-    assert "transactions_lag_28" in past
+    assert "lag_28" in shifted
+    assert "expanding_mean" in shifted
+    assert "transactions_lag_28" in shifted
 
 def test_short_base_lags_are_replaced_not_dropped():
     from src.features.rolling_features import RollingFeatureGenerator
@@ -77,6 +77,22 @@ def test_short_base_lags_are_replaced_not_dropped():
     df = pd.DataFrame({"sales": np.arange(40, dtype=float)})
     out = gen.transform(df, target_col="sales")
     assert "rolling_mean_lag28_w7" in out.columns
+
+def test_constant_sales_are_not_flagged_as_an_expanding_leak():
+    dates = pd.date_range("2023-01-01", periods=120)
+    df = pd.DataFrame({
+        "date": dates,
+        "store_nbr": [1] * 120,
+        "family": ["BABY CARE"] * 120,
+        "sales": np.zeros(120),
+        "onpromotion": np.zeros(120),
+        "dcoilwtico": np.full(120, 40.0),
+        "transactions": np.zeros(120),
+    })
+    pipeline = FeatureEngineeringPipeline(forecast_horizon=28)
+    out = pipeline.fit_transform(df, target_col="sales", date_col="date")
+    assert "expanding_mean" in out.columns
+
 
 def test_fit_transform_rejects_failed_validation(monkeypatch):
     pipeline = FeatureEngineeringPipeline(forecast_horizon=28)

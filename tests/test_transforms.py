@@ -39,6 +39,24 @@ def test_box_cox_transform():
     np.testing.assert_array_almost_equal(series.values, restored.values)
     assert transformer.round_trip_test(series)
 
+def test_inverse_boxcox_clips_outside_negative_lambda_domain():
+    from src.transforms.target_transforms import clip_to_boxcox_domain
+
+    series = pd.Series([1.0, 2.0, 3.0, 4.0, 8.0])
+    transformer = TargetTransformer(method="box_cox")
+    transformer.fit(series)
+    transformer._boxcox_lambda = -0.5
+    transformer._boxcox_shift = 0.0
+
+    wild = pd.Series([0.0, 1.5, 10.0, 100.0])
+    restored = transformer.inverse_transform(wild)
+    assert np.isfinite(restored.to_numpy(dtype=float)).all()
+
+    bound = -1.0 / -0.5
+    clipped = clip_to_boxcox_domain(wild.to_numpy(dtype=float), -0.5)
+    assert np.all(clipped < bound)
+
+
 def test_box_cox_adds_one_to_every_point():
     series = pd.Series([0.0, 1.0, 2.0, 4.0])
     transformer = TargetTransformer(method="box_cox")
@@ -77,3 +95,17 @@ def test_box_cox_lambda_is_refit_on_each_train_window():
     on_train.fit(window_train)
     assert on_train._boxcox_lambda != pytest.approx(frozen)
     assert on_train._boxcox_fit_size == len(window_train)
+
+
+def test_constant_series_falls_back_from_boxcox_to_log1p():
+    zeros = pd.Series(np.zeros(12))
+    transformer = TargetTransformer(method="box_cox")
+    restored = transformer.inverse_transform(transformer.fit_transform(zeros))
+    assert transformer.method == "log"
+    np.testing.assert_array_almost_equal(zeros.values, restored.values)
+
+    flat = pd.Series(np.full(8, 5.0))
+    positive = TargetTransformer(method="box_cox")
+    positive.fit(flat)
+    assert positive.method == "log"
+    assert positive.round_trip_test(flat)

@@ -19,5 +19,6 @@ pipeline:
   forecast_horizon: 28
   cv_windows: 5
   cv_stride: 14
+  residual_min_train_size: 365
   target_transform: box_cox  # difference | log | box_cox | none
   aggregation_level: store_family  # store_family | store_item

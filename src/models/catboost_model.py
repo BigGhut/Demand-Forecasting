@@ -76,13 +76,13 @@ class CatBoostResidualModel:
             likelihood = None
             self.catboost_kwargs["loss_function"] = self.config.loss_function
 
-        # Lags at or beyond a 28-day horizon. An integer such as 7 would make
-        # a 28-step forecast recursive. Darts wants list lags to be negative.
+        # Target lags at or beyond a 28-day horizon. An integer such as 7 would
+        # make a 28-step residual forecast recursive. Darts wants list lags < 0.
+        # Past-covariate lags stay unset: pre-shifted features are passed as
+        # future covariates with lag 0 instead.
         safe_lags = horizon_safe_lags(28)
         self.lags = lags if lags is not None else safe_lags
-        self.lags_past_covariates = (
-            lags_past_covariates if lags_past_covariates is not None else safe_lags
-        )
+        self.lags_past_covariates = lags_past_covariates
         self.lags_future_covariates = lags_future_covariates
 
         # Darts specific params

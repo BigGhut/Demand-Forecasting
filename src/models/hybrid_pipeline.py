@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 import pandas as pd
 from loguru import logger
@@ -9,7 +11,12 @@ from darts import TimeSeries
 
 from src.models.prophet_model import ProphetForecaster
 from src.models.catboost_model import CatBoostResidualModel
-from src.transforms.target_transforms import TargetTransformer
+from src.models.residual_origins import (
+    OriginForecaster,
+    min_residual_length,
+    rolling_origin_residuals,
+)
+from src.transforms.target_transforms import TargetTransformer, clip_to_boxcox_domain
 from src.utils.config import get_base_config
 
 
@@ -20,11 +27,23 @@ def _as_series(series: TimeSeries) -> pd.Series:
     return raw
 
 
+def stack_covariates(
+    left: TimeSeries | None,
+    right: TimeSeries | None,
+) -> TimeSeries | None:
+    """Combine two covariate series that share a time index."""
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return left.stack(right)
+
+
 def transform_series(
     transformer: TargetTransformer,
     series: TimeSeries,
     future_covariates: TimeSeries | None = None,
-    past_covariates: TimeSeries | None = None,
+    shifted_covariates: TimeSeries | None = None,
 ) -> tuple[TimeSeries, TimeSeries | None, TimeSeries | None]:
     """Fit the target transform on ``series`` and align covariate start dates.
 
@@ -40,7 +59,7 @@ def transform_series(
     return (
         series_t,
         _trim_start(future_covariates, series_t),
-        _trim_start(past_covariates, series_t),
+        _trim_start(shifted_covariates, series_t),
     )
 
 
@@ -66,7 +85,9 @@ def inverse_target(
     if method == "box_cox":
         lam = transformer._boxcox_lambda
         shift = transformer._boxcox_shift
-        return predicted.map(lambda values: inv_boxcox(values, lam) - shift)
+        return predicted.map(
+            lambda values: inv_boxcox(clip_to_boxcox_domain(values, lam), lam) - shift
+        )
     if method == "difference":
         if anchor_level is None:
             raise ValueError("Difference inverse needs the last observed sales level.")
@@ -99,30 +120,70 @@ class HybridProphetCatBoost:
     def fit(self, 
             series: TimeSeries, 
             future_covariates: TimeSeries | None = None,
-            past_covariates: TimeSeries | None = None) -> HybridProphetCatBoost:
+            shifted_covariates: TimeSeries | None = None,
+            *,
+            residual_horizon: int | None = None,
+            residual_min_train_size: int | None = None,
+            residual_stride: int | None = None,
+            forecaster_factory: Callable[[], OriginForecaster] | None = None,
+            ) -> HybridProphetCatBoost:
         """Fit the hybrid cascade.
 
         1. Apply the configured target transform (and keep state for the inverse)
-        2. Fit Prophet on the transformed target
-        3. Fit CatBoost on the Prophet residuals in that same space
+        2. Build CatBoost targets from rolling-origin Prophet forecast errors
+        3. Fit the deployment Prophet on the full transformed training series
+        4. Fit CatBoost on those out-of-sample residuals
+
+        ``get_residuals`` is not the CatBoost target. That method scores the
+        same days the Prophet just fitted, and those errors will not be the
+        ones left at forecast time.
         """
         self._anchor_level = float(_as_series(series).iloc[-1])
         # New parameters for this training window. A λ fit on another window,
         # or on train concatenated with validation, is discarded here.
         self.target_transformer = TargetTransformer(method=self.target_transformer.method)
-        series_t, future_t, past_t = transform_series(
-            self.target_transformer, series, future_covariates, past_covariates
+        series_t, future_t, shifted_t = transform_series(
+            self.target_transformer, series, future_covariates, shifted_covariates
         )
+        pipeline = get_base_config().pipeline
+        horizon = residual_horizon or pipeline.forecast_horizon
+        min_train = residual_min_train_size or pipeline.residual_min_train_size
         logger.info(
-            f"Starting Phase 1: Fitting Prophet on '{self.target_transformer.method}' target..."
+            "Starting Phase 1: out-of-sample Prophet residuals "
+            f"on '{self.target_transformer.method}' target..."
         )
+        factory = forecaster_factory or (
+            lambda: ProphetForecaster(config=self.prophet.config)
+        )
+        residuals = rolling_origin_residuals(
+            series_t,
+            future_t,
+            horizon=horizon,
+            min_train_size=min_train,
+            stride=residual_stride,
+            forecaster_factory=factory,
+        )
+        needed = min_residual_length(self.catboost.lags)
+        if len(residuals) < needed:
+            raise ValueError(
+                f"Out-of-sample residuals have {len(residuals)} points; "
+                f"CatBoost lags need at least {needed}. "
+                "In-sample Prophet residuals are not used as a fallback."
+            )
+
+        # The model that will forecast the future sees the whole training
+        # window. It is not one of the prefix models that labeled the residuals.
         self.prophet.fit(series_t, future_covariates=future_t)
 
-        logger.info("Extracting residuals from Prophet...")
-        residuals = self.prophet.get_residuals(series_t, future_covariates=future_t)
-
-        logger.info("Starting Phase 2: Fitting CatBoost on residuals...")
-        self.catboost.fit(residuals, past_covariates=past_t)
+        logger.info(
+            "Starting Phase 2: Fitting CatBoost on {} out-of-sample residual points.",
+            len(residuals),
+        )
+        # Pre-shifted columns are known on the forecast dates. Lag 0 reads
+        # the column at the step being predicted, so an unshifted series
+        # cannot be mixed in by accident. The covariate end stays past the
+        # residual series: that is the horizon being forecast.
+        self.catboost.fit(residuals, future_covariates=_trim_start(shifted_t, residuals))
 
         self._is_fitted = True
         logger.success("Hybrid model fit complete.")
@@ -134,7 +195,7 @@ class HybridProphetCatBoost:
 
     def predict(self, n: int, 
                 future_covariates: TimeSeries | None = None,
-                past_covariates: TimeSeries | None = None,
+                shifted_covariates: TimeSeries | None = None,
                 num_samples: int = 100) -> TimeSeries:
         """Forecast n periods.
         
@@ -150,7 +211,9 @@ class HybridProphetCatBoost:
         prophet_pred = self.prophet.predict(n, future_covariates=future_covariates)
         
         # Note: Prophet pred is deterministic (1 sample), CatBoost is probabilistic
-        catboost_pred = self.catboost.predict(n, past_covariates=past_covariates, num_samples=num_samples)
+        catboost_pred = self.catboost.predict(
+            n, future_covariates=shifted_covariates, num_samples=num_samples
+        )
         
         logger.info("Synthesizing final forecast (Prophet + CatBoost residuals).")
         # Darts uses the left operand's shape for the output array.

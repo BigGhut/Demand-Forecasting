@@ -65,27 +65,36 @@ def tune_hybrid(trial, train_df, val_df):
     ts_val = TimeSeries.from_dataframe(val_feat_df, time_col='date', value_cols='sales', freq='D')
 
     future_cols = [c for c in pipeline.future_covariate_names() if c in df_features.columns]
-    past_cols = [c for c in pipeline.past_covariate_names() if c in df_features.columns]
+    shifted_cols = [c for c in pipeline.shifted_covariate_names() if c in df_features.columns]
     cov_future = (
         TimeSeries.from_dataframe(df_features, time_col='date', value_cols=future_cols, freq='D')
         if future_cols else None
     )
-    cov_past = (
-        TimeSeries.from_dataframe(df_features, time_col='date', value_cols=past_cols, freq='D')
-        if past_cols else None
+    cov_shifted = (
+        TimeSeries.from_dataframe(df_features, time_col='date', value_cols=shifted_cols, freq='D')
+        if shifted_cols else None
     )
 
     p_config = ProphetConfig(changepoint_prior_scale=prophet_cps, seasonality_mode='multiplicative', yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
     c_config = CatBoostConfig(learning_rate=cat_lr, depth=cat_depth, iterations=100, task_type='CPU', early_stopping_rounds=10)
 
     prophet = ProphetForecaster(config=p_config)
-    catboost = CatBoostResidualModel(config=c_config, lags=lags, lags_past_covariates=lags)
+    catboost = CatBoostResidualModel(
+        config=c_config, lags=lags, lags_future_covariates=[0]
+    )
     hybrid = HybridProphetCatBoost(prophet_model=prophet, catboost_model=catboost)
 
-    hybrid.fit(ts_train, future_covariates=cov_future, past_covariates=cov_past)
-    preds = hybrid.predict(n=horizon, future_covariates=cov_future, past_covariates=cov_past, num_samples=1)
-
-    metrics = BusinessMetrics.standard_metrics(ts_val, preds)
+    hybrid.fit(ts_train, future_covariates=cov_future, shifted_covariates=cov_shifted)
+    # One Gaussian sample is not the median. Average the noise out with the
+    # sample median so WAPE can be compared across trials.
+    preds = hybrid.predict(
+        n=horizon,
+        future_covariates=cov_future,
+        shifted_covariates=cov_shifted,
+        num_samples=100,
+    )
+    point = preds.quantile(0.5) if preds.is_probabilistic else preds
+    metrics = BusinessMetrics.standard_metrics(ts_val, point)
 
     # If Tracking Signal is breached, heavily penalize.
     # WAPE, not MAPE: zero-filled days make MAPE undefined or explosive.

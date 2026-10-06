@@ -28,9 +28,11 @@ def test_class_c_matches_hybrid_interface():
 
     fit_params = inspect.signature(model.fit).parameters
     pred_params = inspect.signature(model.predict).parameters
-    assert {"future_covariates", "past_covariates"} <= set(fit_params)
-    assert {"future_covariates", "past_covariates", "num_samples"} <= set(pred_params)
+    assert {"future_covariates", "shifted_covariates"} <= set(fit_params)
+    assert {"future_covariates", "shifted_covariates", "num_samples"} <= set(pred_params)
     assert model.catboost.lags == [-28, -35, -42, -56]
+    assert model.catboost.lags_future_covariates == [0]
+    assert model.catboost.lags_past_covariates is None
     assert model.catboost.catboost_kwargs["task_type"] == "CPU"
     assert model.catboost.model.kwargs["loss_function"] == "RMSEWithUncertainty"
     assert model.target_transformer.method == "box_cox"
@@ -41,6 +43,8 @@ def test_class_a_uses_horizon_lags_and_configured_transform():
     model = ForecastRouter(2, "PRODUCE", segmenter).get_model(forecast_horizon=28)
     assert isinstance(model, HybridProphetCatBoost)
     assert model.catboost.lags == [-28, -35, -42, -56]
+    assert model.catboost.lags_future_covariates == [0]
+    assert model.catboost.lags_past_covariates is None
     assert model.target_transformer.method == "box_cox"
 
 

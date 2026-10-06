@@ -138,8 +138,13 @@ class FeatureEngineeringPipeline:
             names.append(name)
         return names
 
-    def past_covariate_names(self) -> list[str]:
-        """Target history and lagged transactions. These are not known ahead."""
+    def shifted_covariate_names(self) -> list[str]:
+        """History already lagged by at least the horizon.
+
+        Pass these to CatBoost as future covariates with lag 0. The value on
+        a forecast date only depends on sales and traffic at or before the
+        origin, and a raw column cannot be dropped into the same list.
+        """
         names: list[str] = []
         for key in ("lags", "rolling", "expanding"):
             names.extend(self.generators[key].get_feature_names())
@@ -202,14 +207,18 @@ class FeatureEngineeringPipeline:
             )
             got = df["expanding_mean"]
             mask = got.notna() & safe.notna()
-            if mask.any() and not _close(got[mask], safe[mask]):
+            matches_safe = bool(mask.any() and _close(got[mask], safe[mask]))
+            if mask.any() and not matches_safe:
                 errors.append(
                     "expanding_mean does not match the expanding mean of "
                     f"{target_col} shifted by {expanding.base_lag}"
                 )
+            # A constant series makes the shifted mean and the raw mean identical,
+            # so a match with the raw mean is a leak only when the safe mean differs.
             leaky = df[target_col].expanding(min_periods=expanding.min_periods).mean()
             leak_mask = got.notna() & leaky.notna()
-            if leak_mask.any() and _close(got[leak_mask], leaky[leak_mask]):
+            matches_leaky = bool(leak_mask.any() and _close(got[leak_mask], leaky[leak_mask]))
+            if matches_leaky and not matches_safe:
                 errors.append("expanding_mean was computed on the raw target")
 
         self._leakage_errors = errors

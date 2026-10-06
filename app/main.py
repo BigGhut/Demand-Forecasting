@@ -10,7 +10,7 @@ from src.models.hybrid_pipeline import HybridProphetCatBoost
 from src.visualization.decomposition_plots import plot_hybrid_decomposition
 from src.visualization.evaluation_plots import plot_forecast_vs_actuals
 from src.evaluation.metrics import BusinessMetrics
-from src.models.routing import ABCSegmenter, ForecastRouter
+from src.models.routing import ABCSegmenter, ForecastRouter, training_history
 from darts import TimeSeries
 
 st.set_page_config(page_title="Demand Forecasting", layout="wide")
@@ -35,11 +35,16 @@ store_nbr = st.sidebar.selectbox("Store Number", [1, 2, 3, 4, 5])
 family = st.sidebar.selectbox("Product Family", ["PRODUCE", "GROCERY I", "BEVERAGES"])
 horizon = st.sidebar.slider("Forecast Horizon", 7, 90, 28)
 
-# Run Segmentation
-if "segmenter" not in st.session_state:
-    with st.spinner("Computing ABC Segmentation..."):
-        st.session_state.segmenter = ABCSegmenter(datasets['train'])
-        
+# Class shares use only the history before this horizon. The cache follows
+# the slider: a segmenter built on the full series, or on another horizon,
+# would route with the period that is about to be scored.
+if st.session_state.get("abc_horizon") != horizon:
+    with st.spinner("Computing ABC Segmentation on the training history..."):
+        st.session_state.segmenter = ABCSegmenter(
+            training_history(datasets["train"], horizon)
+        )
+        st.session_state.abc_horizon = horizon
+
 abc_class = st.session_state.segmenter.get_class(store_nbr, family)
 st.sidebar.markdown(f"**ABC Class:** {abc_class}")
 
@@ -60,12 +65,12 @@ if st.sidebar.button("Run Forecast Pipeline"):
         )
         
         prophet_covs = [c for c in feature_pipeline.future_covariate_names() if c in df_features.columns]
-        catboost_covs = [c for c in feature_pipeline.past_covariate_names() if c in df_features.columns]
+        shifted_cols = [c for c in feature_pipeline.shifted_covariate_names() if c in df_features.columns]
 
-        df_features = df_features.dropna(subset=catboost_covs).reset_index(drop=True)
+        df_features = df_features.dropna(subset=shifted_cols).reset_index(drop=True)
         df_features = df_features.select_dtypes(exclude=['category', 'object'])
         prophet_covs = [c for c in prophet_covs if c in df_features.columns]
-        catboost_covs = [c for c in catboost_covs if c in df_features.columns]
+        shifted_cols = [c for c in shifted_cols if c in df_features.columns]
         df_features[prophet_covs] = df_features[prophet_covs].fillna(0)
         
         split_date = df_features['date'].max() - pd.Timedelta(days=horizon)
@@ -76,19 +81,26 @@ if st.sidebar.button("Run Forecast Pipeline"):
         ts_val = TimeSeries.from_dataframe(val_df, time_col='date', value_cols='sales', freq='D')
         
         cov_future = TimeSeries.from_dataframe(df_features, time_col='date', value_cols=prophet_covs, freq='D') if prophet_covs else None
-        cov_past = TimeSeries.from_dataframe(df_features, time_col='date', value_cols=catboost_covs, freq='D') if catboost_covs else None
+        cov_shifted = TimeSeries.from_dataframe(df_features, time_col='date', value_cols=shifted_cols, freq='D') if shifted_cols else None
         
     with st.spinner(f"Training Model for Class {abc_class}..."):
         router = ForecastRouter(store_nbr, family, st.session_state.segmenter)
         model = router.get_model(forecast_horizon=horizon)
         # The model applies base_config target_transform and inverts it in predict.
-        model.fit(ts_train, future_covariates=cov_future, past_covariates=cov_past)
+        # Hybrid residual blocks use this slider horizon. Class C has no Prophet stage.
+        fit_kwargs = {
+            "future_covariates": cov_future,
+            "shifted_covariates": cov_shifted,
+        }
+        if isinstance(model, HybridProphetCatBoost):
+            fit_kwargs["residual_horizon"] = horizon
+        model.fit(ts_train, **fit_kwargs)
 
     with st.spinner("Generating Forecast..."):
         preds = model.predict(
             n=horizon,
             future_covariates=cov_future,
-            past_covariates=cov_past,
+            shifted_covariates=cov_shifted,
             num_samples=100,
         )
         preds = preds.map(lambda x: np.clip(x, 0, None))

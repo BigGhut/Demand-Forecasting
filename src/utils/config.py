@@ -51,6 +51,9 @@ class PipelineConfig(BaseModel):
     forecast_horizon: int = Field(28, gt=0)
     cv_windows: int = Field(5, gt=0)
     cv_stride: int = Field(14, gt=0)
+    # History kept before the first residual origin. Prophet is unstable
+    # on a few weeks, and the residual series still has to cover lag 56.
+    residual_min_train_size: int = Field(365, gt=0)
     target_transform: Literal["difference", "log", "box_cox", "none"] = "difference"
     aggregation_level: Literal["store_family", "store_item"] = "store_family"
 

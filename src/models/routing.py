@@ -8,6 +8,7 @@ from src.models.hybrid_pipeline import (
     HybridProphetCatBoost,
     _as_series,
     inverse_target,
+    stack_covariates,
     transform_series,
 )
 from src.models.catboost_model import CatBoostResidualModel, horizon_safe_lags
@@ -19,8 +20,9 @@ from src.utils.config import get_base_config
 class DirectCatBoostForecaster:
     """Class C model with the same fit/predict signature as the hybrid.
 
-    Prophet is skipped, but callers still pass future and past covariates
-    and receive a forecast on the original sales scale.
+    Prophet is skipped. Calendar covariates and pre-shifted history are both
+    future covariates: with output length 1, lag 0 reads the column on the
+    date being forecast.
     """
 
     def __init__(self,
@@ -37,37 +39,70 @@ class DirectCatBoostForecaster:
     def fit(self,
             series: TimeSeries,
             future_covariates: TimeSeries | None = None,
-            past_covariates: TimeSeries | None = None) -> DirectCatBoostForecaster:
+            shifted_covariates: TimeSeries | None = None) -> DirectCatBoostForecaster:
         self._anchor_level = float(_as_series(series).iloc[-1])
         # New parameters for this training window, including a new Box-Cox λ.
         self.target_transformer = TargetTransformer(method=self.target_transformer.method)
-        series_t, future_t, past_t = transform_series(
-            self.target_transformer, series, future_covariates, past_covariates
+        series_t, future_t, shifted_t = transform_series(
+            self.target_transformer, series, future_covariates, shifted_covariates
         )
         self.catboost.fit(
             series_t,
-            past_covariates=past_t,
-            future_covariates=future_t,
+            future_covariates=stack_covariates(future_t, shifted_t),
         )
         self._is_fitted = True
         return self
 
     def predict(self, n: int,
                 future_covariates: TimeSeries | None = None,
-                past_covariates: TimeSeries | None = None,
+                shifted_covariates: TimeSeries | None = None,
                 num_samples: int = 100) -> TimeSeries:
         if not self._is_fitted:
             raise ValueError("Model is not fitted yet.")
         pred = self.catboost.predict(
             n,
-            past_covariates=past_covariates,
-            future_covariates=future_covariates,
+            future_covariates=stack_covariates(future_covariates, shifted_covariates),
             num_samples=num_samples,
         )
         return inverse_target(self.target_transformer, pred, self._anchor_level)
 
     def inverse_transform(self, series: TimeSeries) -> TimeSeries:
         return inverse_target(self.target_transformer, series, self._anchor_level)
+
+def history_until(
+    df: pd.DataFrame,
+    cutoff: pd.Timestamp,
+    date_col: str = "date",
+) -> pd.DataFrame:
+    """Rows on or before ``cutoff``. Later sales stay out of ABC routing."""
+    if date_col not in df.columns:
+        raise ValueError(f"Date column '{date_col}' is not in the frame.")
+    dates = pd.to_datetime(df[date_col])
+    limit = pd.Timestamp(cutoff)
+    kept = df.loc[dates <= limit]
+    if kept.empty:
+        raise ValueError(f"No rows on or before {limit}.")
+    return kept.copy()
+
+
+def training_history(
+    df: pd.DataFrame,
+    horizon: int,
+    date_col: str = "date",
+) -> pd.DataFrame:
+    """Rows on or before the forecast origin.
+
+    The last ``horizon`` days are the period the model is about to score.
+    ABC shares computed on them leak that period into model routing.
+    """
+    if horizon <= 0:
+        raise ValueError(f"horizon must be positive, got {horizon}.")
+    if date_col not in df.columns:
+        raise ValueError(f"Date column '{date_col}' is not in the frame.")
+    dates = pd.to_datetime(df[date_col])
+    cutoff = dates.max() - pd.Timedelta(days=horizon)
+    return history_until(df, cutoff, date_col)
+
 
 class ABCSegmenter:
     """Segments time series into A, B, C classes based on Pareto principle (volume)."""
@@ -122,14 +157,14 @@ class ForecastRouter:
             prophet = ProphetForecaster()
             catboost = CatBoostResidualModel(
                 lags=safe_lags,
-                lags_past_covariates=safe_lags,
+                lags_future_covariates=[0],
             )
             return HybridProphetCatBoost(prophet_model=prophet, catboost_model=catboost)
         logger.info("Using DirectCatBoostForecaster for Class C (skipping Prophet)")
-        # Same-day future covariates are the known calendar and promo columns.
+        # Lag 0 reads a covariate on the forecast date. Pre-shifted columns
+        # are valid there; a raw series would not be.
         catboost = CatBoostResidualModel(
             lags=safe_lags,
-            lags_past_covariates=safe_lags,
             lags_future_covariates=[0],
         )
         return DirectCatBoostForecaster(catboost)

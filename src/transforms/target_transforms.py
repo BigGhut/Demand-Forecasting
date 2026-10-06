@@ -19,6 +19,23 @@ TransformMethod = Literal["difference", "log", "box_cox", "none"]
 _VALID_METHODS: frozenset[str] = frozenset({"difference", "log", "box_cox", "none"})
 
 
+def clip_to_boxcox_domain(values: np.ndarray, lam: float) -> np.ndarray:
+    """Move every entry strictly inside the real domain of the inverse Box-Cox.
+
+    For λ < 0 the inverse is defined only for y < -1/λ. For λ > 0 the
+    inequality flips. A Gaussian residual sample routinely crosses that
+    bound, and ``inv_boxcox`` then returns NaN.
+    """
+    if lam == 0 or not np.isfinite(lam):
+        return values
+    bound = -1.0 / float(lam)
+    # Equality makes λ*y + 1 = 0, which is still outside the real power.
+    eps = 1e-6
+    if lam < 0:
+        return np.minimum(values, bound - eps)
+    return np.maximum(values, bound + eps)
+
+
 class TargetTransformer:
     """Reversible target transformations for time series.
 
@@ -105,19 +122,42 @@ class TargetTransformer:
                     "Box-Cox needs strictly positive values after adding 1. "
                     "Clip the target at 0 before fitting."
                 )
-            _, lam = boxcox(shifted)
-            self._boxcox_lambda = float(lam)
-            self._boxcox_fit_size = int(clean.shape[0])
-            logger.debug(
-                f"Box-Cox fit on {self._boxcox_fit_size} points: "
-                f"lambda={self._boxcox_lambda:.6f}, shift={self._boxcox_shift}"
-            )
+            # scipy.stats.boxcox raises "Data must not be constant". A Favorita
+            # family can be all zeros until sales start, and an early CV window
+            # is then a flat line. log1p still round-trips a constant.
+            if float(np.ptp(shifted)) <= 1e-8:
+                self._fallback_from_boxcox(clean, "series is constant")
+            else:
+                try:
+                    _, lam = boxcox(shifted)
+                except ValueError as exc:
+                    if "constant" not in str(exc).lower():
+                        raise
+                    self._fallback_from_boxcox(clean, str(exc))
+                else:
+                    self._boxcox_lambda = float(lam)
+                    self._boxcox_fit_size = int(clean.shape[0])
+                    logger.debug(
+                        f"Box-Cox fit on {self._boxcox_fit_size} points: "
+                        f"lambda={self._boxcox_lambda:.6f}, shift={self._boxcox_shift}"
+                    )
 
         else:
             logger.debug("Identity transform (none) — no fitting needed.")
 
         self._is_fitted = True
         return self
+
+    def _fallback_from_boxcox(self, clean: pd.Series, reason: str) -> None:
+        """Leave Box-Cox when λ cannot be estimated. log1p inverts a constant."""
+        if (clean < 0).any():
+            self.method = "none"
+            logger.warning(
+                "Box-Cox skipped ({}). Negative values, using none.", reason
+            )
+            return
+        self.method = "log"
+        logger.warning("Box-Cox skipped ({}). Using log1p.", reason)
 
     # ------------------------------------------------------------------
     # Forward transform
@@ -201,7 +241,8 @@ class TargetTransformer:
 
         if self.method == "box_cox":
             assert self._boxcox_lambda is not None
-            inv = inv_boxcox(series.values, self._boxcox_lambda) - self._boxcox_shift
+            clipped = clip_to_boxcox_domain(np.asarray(series.values, dtype=float), self._boxcox_lambda)
+            inv = inv_boxcox(clipped, self._boxcox_lambda) - self._boxcox_shift
             return pd.Series(inv, index=series.index, name=series.name)
 
         # method == "none"
